@@ -1,5 +1,6 @@
 """
-Solar Site Score = weighted composite of 6 scientific factors.
+SolarIQ Egypt — Gold Layer: Solar Site Scoring (Full Robust Version)
+FIXED: Column name mismatch and KeyError handling.
 Weights based on peer-reviewed solar site selection research.
 """
 
@@ -8,10 +9,10 @@ import numpy as np
 import logging
 import os
 
+# ── Setup ──────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
-
 
 def calculate_solar_site_score(
     weather_path: str = 'data/silver/weather_clean.csv',
@@ -19,157 +20,119 @@ def calculate_solar_site_score(
     output_path: str  = 'data/gold/solar_site_scores.csv'
 ) -> pd.DataFrame:
 
-    # ── Load ─────────────────────────────────────────────
-    logger.info("Loading cleaned datasets...")
-
+    # ── 1. Load Data ─────────────────────────────────────
+    logger.info("Loading silver datasets...")
     if not os.path.exists(weather_path) or not os.path.exists(air_path):
-        logger.error("Missing silver files! Run cleaning scripts first.")
-        raise FileNotFoundError("Missing silver files! Run cleaning scripts first.")
+        logger.error("Missing silver files! Please run cleaning scripts first.")
+        raise FileNotFoundError("Missing silver files!")
 
-    weather = pd.read_csv(weather_path, parse_dates=['date'])
+    weather = pd.read_csv(weather_path)
     air     = pd.read_csv(air_path)
 
-    # ── Fix datetime column name issue (important fix) ───
-    if 'datetime' in air.columns:
-        air['datetime'] = pd.to_datetime(air['datetime'])
-    elif 'date' in air.columns:
-        air['datetime'] = pd.to_datetime(air['date'])
+    # تنظيف أسماء الأعمدة (إزالة المسافات وتحويلها لصغير لضمان المطابقة)
+    weather.columns = [c.strip().lower() for c in weather.columns]
+    air.columns = [c.strip().lower() for c in air.columns]
 
-    # ── Validate required columns early ───────────────────
-    required_weather_cols = [
-        'ALLSKY_SFC_SW_DWN', 'clearness_index',
-        'T2M_MAX', 'WS2M', 'RH2M'
-    ]
-
-    missing = [col for col in required_weather_cols if col not in weather.columns]
-    if missing:
-        raise ValueError(f"Missing columns in weather dataset: {missing}")
-
-    # ── Aggregate weather ────────────────────────────────
-    logger.info("Aggregating weather metrics by governorate...")
+    # ── 2. Aggregate Weather ────────────────────────────
+    logger.info("Aggregating weather metrics...")
+    
+    # التأكد من وجود عمود peak_sun_hours أو حسابه من الإشعاع
+    if 'peak_sun_hours' not in weather.columns:
+        if 'allsky_sfc_sw_dwn' in weather.columns:
+            weather['peak_sun_hours'] = weather['allsky_sfc_sw_dwn']
+        else:
+            logger.error("Critical column 'allsky_sfc_sw_dwn' missing in weather data!")
 
     w_agg = weather.groupby('governorate').agg(
-        avg_clearness_index=('clearness_index', 'mean'),
+        avg_solar_radiation=('allsky_sfc_sw_dwn', 'mean'),
         avg_peak_sun_hours=('peak_sun_hours', 'mean'),
-        avg_solar_radiation=('ALLSKY_SFC_SW_DWN', 'mean'),
-
-        avg_temp_penalty=('temp_penalty_pct', 'mean'),
-
-        avg_temp_max=('T2M_MAX', 'mean'),
-        avg_temp_range=('temp_range', 'mean'),
-
-        avg_cloud_impact=('cloud_impact', 'mean'),
-        avg_wind_speed=('WS2M', 'mean'),
-        avg_humidity=('RH2M', 'mean'),
-        
-        hot_days_per_year=('is_hot_day', 'mean'),
-        years_of_data=('year', 'nunique')
+        # معالجة اختلاف أسماء الأعمدة (clearness vs clearness_index)
+        avg_clearness=('clearness_index', 'mean') if 'clearness_index' in weather.columns else ('clearness', 'mean'),
+        avg_temp_max=('t2m_max', 'mean'),
+        avg_temp_range=('temp_range', 'mean') if 'temp_range' in weather.columns else ('t2m_max', 'std'),
+        avg_cloud_impact=('cloud_impact', 'mean') if 'cloud_impact' in weather.columns else ('clearness', 'std'),
+        avg_wind_speed=('ws2m', 'mean'),
+        avg_humidity=('rh2m', 'mean'),
+        # معالجة اختلاف أسماء الأعمدة (temp_pen vs temp_penalty_pct)
+        avg_temp_penalty=('temp_penalty_pct', 'mean') if 'temp_penalty_pct' in weather.columns else ('temp_pen', 'mean'),
+        hot_days_per_year=('is_hot_day', 'mean')
     ).reset_index()
 
-
-    # ── Aggregate air quality ────────────────────────────
-    logger.info("Aggregating air quality metrics by governorate...")
-
+    # ── 3. Aggregate Air Quality ───────────────────────
+    logger.info("Aggregating air quality metrics...")
+    
+    # التوافق مع ملف air_quality_clean.csv الجديد
     aq_agg = air.groupby('governorate').agg(
-        avg_aqi=('aqi', 'mean'),
+        avg_aqi=('aqi_level', 'mean') if 'aqi_level' in air.columns else ('aqi', 'mean'),
         avg_pm25=('pm2_5', 'mean'),
         avg_pm10=('pm10', 'mean'),
+        avg_no2=('nitrogen_dioxide', 'mean') if 'nitrogen_dioxide' in air.columns else ('no2', 'mean'),
+        avg_so2=('sulphur_dioxide', 'mean') if 'sulphur_dioxide' in air.columns else ('so2', 'mean')
     ).reset_index()
 
-    # ── Merge ────────────────────────────────────────────
+    # ── 4. Merge ─────────────────────────────────────────
     df = w_agg.merge(aq_agg, on='governorate', how='left')
-    logger.info(f"Merged dataset: {len(df)} governorates")
+    logger.info(f"Merged dataset contains {len(df)} governorates.")
 
-    # ── FIXED normalization function ──────────────────────
+    # ── 5. Normalization Logic ──────────────────────────
     def normalize(series, higher_is_better=True):
         mn, mx = series.min(), series.max()
-
-        if pd.isna(mn) or pd.isna(mx) or mx == mn:
-            return pd.Series(50, index=series.index)
-
+        if mn == mx or pd.isna(mn): return pd.Series(50, index=series.index)
         norm = (series - mn) / (mx - mn) * 100
+        return norm if higher_is_better else 100 - norm
 
-        if not higher_is_better:
-            norm = 100 - norm
-
-        return norm.clip(0, 100)
-
-    # ── Scores ────────────────────────────────────────────
+    # ── 6. Scientific Scoring ────────────────────────────
+    # تحويل القيم لدرجات من 0 لـ 100
     df['score_ghi']       = normalize(df['avg_solar_radiation'], True)
-    df['score_clearness'] = normalize(df['avg_clearness_index'], True)
+    df['score_clearness'] = normalize(df['avg_clearness'], True)
     df['score_temp']      = normalize(df['avg_temp_max'], False)
     df['score_wind']      = normalize(df['avg_wind_speed'], True)
-    df['score_humidity']   = normalize(df['avg_humidity'], False)
+    df['score_humidity']  = normalize(df['avg_humidity'], False)
+    df['score_air']       = normalize(df['avg_aqi'].fillna(df['avg_aqi'].median()), False)
 
-    df['score_air'] = normalize(
-        df['avg_aqi'].fillna(df['avg_aqi'].median()),
-        False
-    )
-
-    # ── Weights ──────────────────────────────────────────
+    # أوزان العوامل (Weights)
     WEIGHTS = {
-        'score_ghi': 0.35,
-        'score_clearness': 0.20,
-        'score_temp': 0.15,
-        'score_air': 0.15,
-        'score_wind': 0.10,
-        'score_humidity': 0.05,
+        'score_ghi': 0.35,       # Solar Radiation
+        'score_clearness': 0.20, # Atmospheric Clarity
+        'score_temp': 0.15,      # Heat Penalty
+        'score_air': 0.15,       # Air Quality/Dust
+        'score_wind': 0.10,      # Wind Cooling
+        'score_humidity': 0.05,  # Humidity/Corrosion
     }
 
-    df['solar_site_score'] = sum(
-        df[col] * weight for col, weight in WEIGHTS.items()
-    ).round(2)
+    df['solar_site_score'] = sum(df[col] * weight for col, weight in WEIGHTS.items()).round(2)
 
-    # ── Rank ─────────────────────────────────────────────
-    df['rank'] = df['solar_site_score'].rank(
-        ascending=False, method='dense'
-    ).astype(int)
+    # ── 7. Ranking & Recommendations ─────────────────────
+    df['rank'] = df['solar_site_score'].rank(ascending=False, method='dense').astype(int)
 
-    # ── Recommendation ───────────────────────────────────
-    def recommendation(score):
-        if score >= 75:
-            return 'Strongly Recommended'
-        elif score >= 60:
-            return 'Recommended'
-        elif score >= 50:
-            return 'Neutral'
-        else:
-            return 'Not Recommended'
+    def get_recommendation(score):
+        if score >= 75: return 'Strongly Recommended'
+        if score >= 60: return 'Recommended'
+        if score >= 50: return 'Neutral'
+        return 'Not Recommended'
 
-    df['investment_recommendation'] = df['solar_site_score'].apply(recommendation)
+    def get_grade(score):
+        if score >= 80: return 'A+'
+        if score >= 70: return 'A'
+        if score >= 60: return 'B'
+        if score >= 50: return 'C'
+        return 'D'
 
-    # FIX: grade column was missing
-    def grade(score):
-        if score >= 80:
-            return 'A'
-        elif score >= 70:
-            return 'B'
-        elif score >= 60:
-            return 'C'
-        else:
-            return 'D'
+    df['investment_reco'] = df['solar_site_score'].apply(get_recommendation)
+    df['grade'] = df['solar_site_score'].apply(get_grade)
 
-    df['grade'] = df['solar_site_score'].apply(grade)
-
-    # ── Save ─────────────────────────────────────────────
+    # ── 8. Save Final Gold Table ─────────────────────────
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df.to_csv(output_path, index=False, encoding='utf-8-sig')
+    logger.info(f"SUCCESS: Gold layer saved to {output_path}")
 
-    logger.info(f"Saved to {output_path}")
-
-    # ── Top 10 ───────────────────────────────────────────
-    print("\n" + "="*60)
-    print("SOLAR SITE SCORE RANKING — TOP 10")
-    print("="*60)
-
-    top_10 = df.sort_values('rank').head(10)[
-        ['rank', 'governorate', 'solar_site_score', 'grade']
-    ]
-
-    print(top_10.to_string(index=False))
-
+    # Print Summary for Verification
+    print("\n" + "="*50)
+    print("TOP GOVERNORATES FOR SOLAR INVESTMENT")
+    print("="*50)
+    print(df.sort_values('rank').head(5)[['rank', 'governorate', 'solar_site_score', 'grade']])
+    
     return df
-
 
 if __name__ == '__main__':
     calculate_solar_site_score()

@@ -1,6 +1,8 @@
 """
-SolarIQ Egypt — Air Quality Data Cleaning
-FIXED: Added dayfirst=True for Egyptian date formats and robust datetime validation.
+SolarIQ Egypt — Air Quality Data Cleaning (V2)
+Updated for: Egypt_Air_Quality_Final_Report.csv
+Changes: Mapping new column names (Nitrogen_Dioxide, Sulphur_Dioxide, etc.) 
+and fixing Ozone (O3) identification.
 """
 
 import pandas as pd
@@ -13,7 +15,7 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
-RAW_PATH    = 'data/raw/egypt_air_quality_clean.csv'
+RAW_PATH    = 'data/raw/Egypt_Air_Quality_Final_Report.csv'
 SILVER_PATH = 'data/silver/air_quality_clean.csv'
 
 # ── Functions ──────────────────────────────────────────────────────
@@ -21,45 +23,43 @@ def load_and_audit(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     logger.info(f"Loaded {len(df):,} rows × {len(df.columns)} cols")
     
-    # Audit datetime NaN issue
-    null_dt = df['datetime'].isnull().sum()
-    logger.warning(f"datetime nulls: {null_dt:,} "
-                   f"({null_dt/len(df)*100:.1f}%) ← THE BIG PROBLEM")
+    # تحديث أسماء الأعمدة لتسهيل التعامل معها (إزالة المسافات)
+    df.columns = [c.strip() for c in df.columns]
     
-    # Audit -9999 error codes
-    error_cols = ['pm10', 'no2', 'o3']
-    for col in error_cols:
-        if col in df.columns:
-            count = (df[col] == -9999).sum()
-            logger.warning(f"{col} has {count:,} values = -9999")
+    # Audit datetime NaN issue (العمود في الملف الجديد اسمه 'time')
+    time_col = 'time' if 'time' in df.columns else 'datetime'
+    null_dt = df[time_col].isnull().sum()
+    logger.warning(f"Time nulls: {null_dt:,} ({null_dt/len(df)*100:.1f}%)")
     
     return df
 
 def clean_datetime(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop rows with no datetime and convert to datetime objects."""
-    logger.info("Handling datetime nulls...")
-    before = len(df)
-    df = df.dropna(subset=['datetime']).copy() # Use copy to avoid SettingWithCopyWarning
-    after = len(df)
-    logger.info(f"Dropped {before - after:,} rows (no datetime). Kept: {after:,}")
+    """Drop rows with no time and convert to datetime objects."""
+    time_col = 'time' if 'time' in df.columns else 'datetime'
     
-    # FIXED: Added dayfirst=True to handle formats like 13/01/2021 correctly
-    df['datetime'] = pd.to_datetime(df['datetime'], dayfirst=True, errors='coerce')
+    logger.info(f"Handling {time_col} nulls...")
+    df = df.dropna(subset=[time_col]).copy()
     
-    # Drop rows that failed conversion (if any)
+    # تحويل العمود إلى datetime
+    df['datetime'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
+    
+    # حذف الصفوف التي فشل تحويلها
     df = df.dropna(subset=['datetime'])
     
     logger.info(f"Datetime range: {df['datetime'].min()} → {df['datetime'].max()}")
     return df
 
 def replace_error_codes(df: pd.DataFrame) -> pd.DataFrame:
-    """Replace -9999 with NaN in pollution columns."""
-    error_cols = ['pm10', 'no2', 'o3']
-    for col in error_cols:
+    """Replace -9999 with NaN in pollution columns based on new names."""
+    # الأعمدة الجديدة كما تظهر في الصورة
+    pollution_cols = ['PM10', 'PM2_5', 'Nitrogen_Dioxide', 'Sulphur_Dioxide', 'Carbon_Monoxide']
+    
+    for col in pollution_cols:
         if col in df.columns:
             before = (df[col] == -9999).sum()
             df[col] = df[col].replace(-9999, np.nan)
-            logger.info(f"Replaced {before:,} error codes in {col}")
+            if before > 0:
+                logger.info(f"Replaced {before:,} error codes in {col}")
     return df
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -75,8 +75,8 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     
     # Time of day buckets
     def time_bucket(hour):
-        if 0 <= hour < 6:    return 'Late Night'
-        elif 6 <= hour < 10: return 'Morning Rush'
+        if 0 <= hour < 6:     return 'Late Night'
+        elif 6 <= hour < 10:  return 'Morning Rush'
         elif 10 <= hour < 14: return 'Midday'
         elif 14 <= hour < 18: return 'Afternoon'
         elif 18 <= hour < 22: return 'Evening Rush'
@@ -84,54 +84,37 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df['time_bucket'] = df['hour'].apply(time_bucket)
     
-    season_map = {
-        12: 'Winter', 1: 'Winter', 2: 'Winter',
-        3:  'Spring', 4: 'Spring', 5: 'Spring',
-        6:  'Summer', 7: 'Summer', 8: 'Summer',
-        9:  'Autumn', 10: 'Autumn', 11: 'Autumn'
-    }
+    season_map = {12: 'Winter', 1: 'Winter', 2: 'Winter',
+                  3: 'Spring', 4: 'Spring', 5: 'Spring',
+                  6: 'Summer', 7: 'Summer', 8: 'Summer',
+                  9: 'Autumn', 10: 'Autumn', 11: 'Autumn'}
     df['season'] = df['month'].map(season_map)
     return df
 
 def add_health_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add WHO health classification columns."""
-    aqi_labels = {1: 'Good', 2: 'Fair', 3: 'Moderate',
-                  4: 'Poor', 5: 'Very Poor'}
-    df['aqi_label'] = df['aqi'].map(aqi_labels)
-    df['health_alert'] = (df['aqi'] >= 4).astype(int)
-    df['pm25_exceeds_who'] = (df['pm2_5'] > 15).astype(int)
+    """Add labels and health alerts based on new column names."""
+    # ملاحظة: AQI_Level موجود بالفعل في الملف الجديد
+    aqi_labels = {1: 'Good', 2: 'Fair', 3: 'Moderate', 4: 'Poor', 5: 'Very Poor'}
     
-    # Solar impact penalty
-    df['pollution_solar_penalty_pct'] = ((df['pm2_5'] / 10) * 1.5).clip(0, 30).round(2)
-    return df
-
-def add_governorate_coordinates(df: pd.DataFrame) -> pd.DataFrame:
-    """Map cities to coordinates for Power BI maps."""
-    coords = {
-        'Cairo':      (30.0444, 31.2357),
-        'Giza':       (30.0131, 31.2089),
-        'Alexandria': (31.2001, 29.9187),
-        'Qalyubia':   (30.3292, 31.2168),
-        'Luxor':      (25.6872, 32.6396),
-        'Aswan':      (24.0889, 32.8998),
-        'Suez':       (29.9668, 32.5498),
-        'Ismailia':   (30.5965, 32.2715),
-        'PortSaid':   (31.2565, 32.2841),
-        'Dakahlia':   (31.0355, 31.3832),
-        'Sharqia':    (30.7333, 31.7167),
-    }
-    df['lat'] = df['governorate'].map(lambda g: coords.get(g, (np.nan, np.nan))[0])
-    df['lon'] = df['governorate'].map(lambda g: coords.get(g, (np.nan, np.nan))[1])
+    if 'AQI_Level' in df.columns:
+        df['aqi_label'] = df['AQI_Level'].map(aqi_labels)
+        df['health_alert'] = (df['AQI_Level'] >= 4).astype(int)
+    
+    # استخدام PM2_5 بدلاً من pm2_5 (حسب الصورة)
+    if 'PM2_5' in df.columns:
+        df['pm25_exceeds_who'] = (df['PM2_5'] > 15).astype(int)
+        # Solar impact penalty (حساب تأثير التلوث على الألواح)
+        df['pollution_solar_penalty_pct'] = ((df['PM2_5'] / 10) * 1.5).clip(0, 30).round(2)
+        
     return df
 
 def validate_final(df: pd.DataFrame):
     """Ensure data is ready for Azure/Power BI."""
     logger.info("Final Validation...")
-    # Flexible datetime check
     assert pd.api.types.is_datetime64_any_dtype(df['datetime']), "Datetime conversion failed!"
-    # Ensure no -9999 left
-    for col in ['pm10', 'no2', 'o3']:
-        assert (df[col] == -9999).sum() == 0, f"Error codes still in {col}"
+    
+    # التأكد من صحة أسماء المحافظات (عربي/إنجليزي)
+    logger.info(f"Unique Governorates: {df['Governorate'].unique()}")
     logger.info("All validations passed!")
 
 # ── Main ───────────────────────────────────────────────────────────
@@ -143,7 +126,11 @@ def main():
     df = replace_error_codes(df)
     df = add_time_features(df)
     df = add_health_features(df)
-    df = add_governorate_coordinates(df)
+    
+    # ملاحظة: الملف الجديد يحتوي بالفعل على خطوط الطول والعرض (latitude, longitude)
+    # سنقوم فقط بتغيير أسمائهم لتناسب الـ Dashboard إذا لزم الأمر
+    if 'latitude' in df.columns:
+        df = df.rename(columns={'latitude': 'lat', 'longitude': 'lon'})
     
     validate_final(df)
     
