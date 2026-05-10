@@ -365,6 +365,9 @@ def main():
     validate_cleaned(df)
     print_sample(df)
 
+    df = df[df['date'].dt.year >= 2003]
+    df = df[df['date'].dt.year <= 2024]
+
     # Save — UTF-8 BOM for Arabic compatibility in Excel & Power BI
     df.to_csv(SILVER_PATH, index=False, encoding='utf-8-sig')
     logger.info(f"\n✔ Saved to: {SILVER_PATH}")
