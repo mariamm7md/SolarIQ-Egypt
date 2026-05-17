@@ -9,7 +9,7 @@ BEGIN
 END
 
 IF NOT EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'my_cred')
-BEGIN
+BEGIN 
     CREATE DATABASE SCOPED CREDENTIAL my_cred
     WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
     SECRET = 'sv=2025-11-05&ss=bfqt&srt=sco&sp=rwdlacupyx&se=2026-06-05T22:56:23Z&st=2026-05-07T14:41:23Z&spr=https&sig=yrf7NwcysT0T8Pq82fLepBc1RN3pujPmkwdgilzj6HE%3D';
