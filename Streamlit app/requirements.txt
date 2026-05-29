@@ -1,4 +1,12 @@
-python-dotenv
 streamlit
 pandas
+numpy
 plotly
+openai
+faiss-cpu
+sentence-transformers
+langchain
+langchain-openai
+langchain-community
+requests
+python-dotenv
