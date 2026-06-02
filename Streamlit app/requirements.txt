@@ -10,3 +10,9 @@ langchain-openai
 langchain-community
 requests
 python-dotenv
+pyodbc
+sqlalchemy
+openpyxl
+folium
+streamlit-folium
+
